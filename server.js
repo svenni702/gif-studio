@@ -10,7 +10,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { spawn, execFile, execFileSync } = require('child_process');
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const args = {};
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
@@ -34,8 +34,86 @@ function desktopDir() {
   }
   return path.join(os.homedir(), 'Desktop');
 }
-const OUT_DIR = typeof args.out === 'string' ? args.out : path.join(desktopDir(), 'Gif Studio');
 const TMP = path.join(os.tmpdir(), 'gif-studio');
+
+// Settings the user changes in the app (for now: the output folder). A folder picked in the app
+// wins over --out, so it sticks across restarts no matter how Gif Studio is started.
+const SETTINGS_FILE = path.join(process.env.APPDATA || path.join(os.homedir(), '.config'), 'gif-studio', 'settings.json');
+function loadSettings() {
+  try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) || {}; } catch (e) { return {}; }
+}
+function saveSettings(s) {
+  fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
+}
+const settings = loadSettings();
+const DEFAULT_OUT = typeof args.out === 'string' ? args.out : path.join(desktopDir(), 'Gif Studio');
+let OUT_DIR = settings.outDir || DEFAULT_OUT;
+
+// Windows' modern folder picker (IFileOpenDialog with FOS_PICKFOLDERS), shown on top of the app window.
+// Prints the chosen folder, or nothing when cancelled. Start folder comes in through GS_START.
+const PICK_FOLDER_PS = `
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class FolderPicker {
+  [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")] class FileOpenDialog {}
+  [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IFileDialog {
+    [PreserveSig] int Show(IntPtr parent);
+    void SetFileTypes(uint c, IntPtr f); void SetFileTypeIndex(uint i); void GetFileTypeIndex(out uint i);
+    void Advise(IntPtr p, out uint c); void Unadvise(uint c);
+    void SetOptions(uint fos); void GetOptions(out uint fos);
+    void SetDefaultFolder(IShellItem si); void SetFolder(IShellItem si);
+    void GetFolder(out IShellItem si); void GetCurrentSelection(out IShellItem si);
+    void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string n); void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string n);
+    void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string t);
+    void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string t);
+    void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string t);
+    void GetResult(out IShellItem si);
+  }
+  [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IShellItem {
+    void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+    void GetParent(out IShellItem si);
+    void GetDisplayName(uint sigdn, [MarshalAs(UnmanagedType.LPWStr)] out string name);
+  }
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+  static extern void SHCreateItemFromParsingName(string path, IntPtr pbc, ref Guid riid, out IShellItem si);
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  public static string Pick(string start) {
+    var d = (IFileDialog)new FileOpenDialog();
+    d.SetOptions(0x20 | 0x40 | 0x800); // PICKFOLDERS | FORCEFILESYSTEM | PATHMUSTEXIST
+    d.SetTitle("Where should Gif Studio save your clips?");
+    d.SetOkButtonLabel("Save clips here");
+    try {
+      if (!string.IsNullOrEmpty(start) && System.IO.Directory.Exists(start)) {
+        var g = new Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"); IShellItem si;
+        SHCreateItemFromParsingName(start, IntPtr.Zero, ref g, out si); d.SetFolder(si);
+      }
+    } catch {}
+    if (d.Show(GetForegroundWindow()) != 0) return "";
+    IShellItem r; d.GetResult(out r); string p; r.GetDisplayName(0x80058000, out p); return p; // SIGDN_FILESYSPATH
+  }
+}
+"@
+[FolderPicker]::Pick($env:GS_START)
+`;
+
+function pickFolder(start) {
+  return new Promise((resolve, reject) => {
+    if (!IS_WIN) return reject(new Error('Changing the folder from the app only works on Windows. Start Gif Studio with --out "<folder>" instead.'));
+    const enc = Buffer.from(PICK_FOLDER_PS, 'utf16le').toString('base64');
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', enc],
+      { env: Object.assign({}, process.env, { GS_START: start }), maxBuffer: 1 << 20 },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error('Could not open the folder picker: ' + (stderr || err.message).toString().trim().split('\n')[0]));
+        resolve(stdout.toString('utf8').trim());
+      });
+  });
+}
 const BYE_EXIT_MS = 20 * 1000;           // window closed: quit if it doesn't come back (a reload pings again)
 const IDLE_EXIT_MS = 3 * 60 * 60 * 1000; // safety net: quit after 3 hours without any window
 const LOG = path.join(os.tmpdir(), 'gif-studio', 'server.log');
@@ -486,6 +564,16 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/file-action' && req.method === 'POST') {
       const b = await readJson(req);
+      if (b.action === 'choose-folder') {
+        const start = fs.existsSync(OUT_DIR) ? OUT_DIR : path.dirname(OUT_DIR);
+        const picked = await pickFolder(start);
+        if (!picked) return send(res, 200, { outDir: OUT_DIR, changed: false });
+        fs.mkdirSync(picked, { recursive: true });
+        OUT_DIR = picked;
+        settings.outDir = picked;
+        saveSettings(settings);
+        return send(res, 200, { outDir: OUT_DIR, changed: true });
+      }
       if (b.action === 'folder') {
         fs.mkdirSync(OUT_DIR, { recursive: true });
         spawn('explorer.exe', [`"${OUT_DIR}"`], { windowsVerbatimArguments: true, detached: true }).unref();

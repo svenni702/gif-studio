@@ -37,7 +37,7 @@ It opens MP4, WebM, MOV, MKV, AVI, GIF and WebP files. Formats Chrome can't play
 
 That's it. Gif Studio opens in its own window. Drop a video in and go.
 
-Finished clips are saved in a **Gif Studio** folder on your Desktop.
+Finished clips are saved in a **Gif Studio** folder on your Desktop. Click **Change** under the Convert button to pick another folder. Gif Studio remembers your choice.
 
 > **Prefer to install things yourself?** Node.js: <https://nodejs.org> (LTS). ffmpeg: `winget install Gyan.FFmpeg`, or download it from <https://www.gyan.dev/ffmpeg/builds/> and put `ffmpeg.exe` and `ffprobe.exe` in a folder named `ffmpeg` next to `Start Gif Studio.bat`.
 
@@ -85,7 +85,7 @@ GIF is an old format, and file size grows fast with **width × height × frames*
 - **"ffmpeg was not found"**: install it (see above), then close Gif Studio and start it again. A new install is only picked up by new windows.
 - **"The background server stopped"**: the black console window was closed. Start `Start Gif Studio.bat` again. The open window reconnects by itself and keeps your clip and settings.
 - **Port already in use**: run `Start Gif Studio.bat --port 47824` (any free number).
-- **Choosing where clips are saved**: run `Start Gif Studio.bat --out "D:\My clips"`.
+- **Choosing where clips are saved**: click **Change** under the Convert button. The choice is stored in `%APPDATA%\gif-studio\settings.json`; delete that file to go back to the default.
 - Something odd? Unexpected errors are written to `%TEMP%\gif-studio\server.log`.
 
 ## For tinkerers
