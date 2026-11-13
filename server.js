@@ -10,7 +10,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { spawn, execFile, execFileSync } = require('child_process');
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const args = {};
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
@@ -222,9 +222,9 @@ function parseRate(r) {
 }
 
 async function probe(file) {
-  const out = await run(FFPROBE, ['-v', 'error', '-show_entries',
-    'stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate:stream_side_data=rotation:stream_tags=rotate:format=duration',
-    '-of', 'json', file]);
+  // Full stream/format info instead of -show_entries: section names (like stream_side_data) differ
+  // between ffprobe versions and older ones reject them, but -show_streams works everywhere.
+  const out = await run(FFPROBE, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', file]);
   const j = JSON.parse(out);
   const v = (j.streams || []).find((s) => s.codec_type === 'video');
   if (!v) throw new Error('No video stream found in this file.');
